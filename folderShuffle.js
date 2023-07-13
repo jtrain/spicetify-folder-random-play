@@ -6,46 +6,48 @@
 
 /// <reference path="../globals.d.ts" />
 
-(async function folderShuffle() {
+(function FolderShuffle() {
     if (!(Spicetify.CosmosAsync && Spicetify.Platform)) {
-        setTimeout(ShuffleFolder, 300);
+        setTimeout(FolderShuffle, 1000);
         return;
     }
-    await initShuffleFolder();
-});
 
-async function initShuffleFolder() {
+    let playerPlayOGFunc = Spicetify.Platform.PlayerAPI.play.bind(Spicetify.Platform.PlayerAPI);
+    let isInjected = localStorage.getItem("foldershuffle:on") === "true";
+    // injectFunctions(isInjected);
 
-    async function getFromStorage(key) {
-        return Spicetify.LocalStorage.get(key);
+    function injectFunctions(bool) {
+        if (bool) {
+            Spicetify.Platform.PlayerAPI.play = (uri, origins, options) => {
+                if (options?.skipTo) {
+                    if (options.skipTo.index !== undefined) {
+                        playerPlayOGFunc(uri, origins, options);
+                        return;
+                    } else if (options.skipTo.pageIndex !== undefined) {
+                        uri.uri = options.skipTo.fallbackContextURI;
+                    } else {
+                        throw "No idea what to do. Please report on Github repo, specify which page you are in.";
+                    }
+                }
+                fetchAndPlay(uri.uri);
+            };
+        } else {
+            // Revert
+            Spicetify.Platform.PlayerAPI.play = playerPlayOGFunc;
+        }
     }
-    async function setToStorage(key, value) {
-        Spicetify.LocalStorage.set(key, value);
-    }
-
-    let isInjected = getFromStorage('shufflefolder:on')  === "true";
-
-    const autoShuffleMenu = new Spicetify.Menu.Item("Folder shuffle", isInjected, (menuItem) => {
-        isInjected = !isInjected;
-        setToStorage("shufflefolder:on", String(isInjected));
-        menuItem.isEnabled = isInjected;
-    });
-
-    new Spicetify.Menu.SubMenu("Folder Shuffle", [autoShuffleMenu]).register();
 
     // Text of notification when queue is shuffled successfully
     /** @param {number} count */
     const NOTIFICATION_TEXT = (count) => `Shuffled ${count} playlists!`;
 
     const cntxMenu = new Spicetify.ContextMenu.Item(
-        "Shuffle playlists",
+        "Shuffle this folder",
         (uris) => {
             if (uris.length === 1) {
-                await fetchAndPlay(uris[0]);
+                fetchAndPlay(uris[0]);
                 return;
             }
-
-            await Queue(uris);
         },
         (uris) => {
             if (uris.length === 1) {
@@ -56,11 +58,11 @@ async function initShuffleFolder() {
                 }
                 return false;
             }
-            // User selects multiple tracks in a list.
-            return true;
+            return false;
         },
-        "folder-shuffle"
-    ).register();
+        "shuffle"
+    );
+    cntxMenu.register();
 
     /**
      *
@@ -83,10 +85,10 @@ async function initShuffleFolder() {
      * @returns {Promise<string[]>}
      */
     const fetchPlaylist = async (uri) => {
-        const res = await Spicetify.CosmosAsync.get(`sp://core-playlist/v1/playlist/spotify:playlist:${uri}/rows`, {
-            policy: { link: true, playable: true },
+        const res = await Spicetify.CosmosAsync.get(`sp://core-playlist/v1/playlist/${uri}/rows`, {
+            policy: { link: true },
         });
-        return res.rows.filter(track => track.playable).map((item) => item.link);
+        return res.rows.map((item) => item.link);
     };
 
     /**
@@ -113,7 +115,7 @@ async function initShuffleFolder() {
     /**
      *
      * @param {string} uri
-     * @returns {Promise<string[]>}
+     * @returns {playlists: Promise<string[]>, count: integer}
      */
     const fetchFolder = async (uri) => {
         const res = await Spicetify.CosmosAsync.get(`sp://core-playlist/v1/rootlist`, {
@@ -126,19 +128,23 @@ async function initShuffleFolder() {
         }
 
         let requestPlaylists = [];
-        async function fetchNested(folder) {
+        let albumCount = 0;
+        const fetchNested = async (folder) => {
             if (!folder.rows) return;
 
             for (const i of folder.rows) {
-                if (i.type === "playlist") requestPlaylists.push(await fetchPlaylist(i.link.split(":")[2]));
-                else if (i.type === "folder") await fetchNested(i);
+                if (i.type === "playlist") {
+                    albumCount++;
+                    requestPlaylists.push(await fetchPlaylist(i.link));
+                }
+                else if (i.type === "folder") fetchNested(i);
             }
         };
 
         await fetchNested(requestFolder);
 
-        songs = shuffle(requestPlaylists).flat()
-        return {songs: songs, albumCount: requestPlaylists.length};
+        playlists = shuffle(requestPlaylists).flat();
+        return {playlists: playlists, albumCount: albumCount};
     };
 
     /**
@@ -168,6 +174,10 @@ async function initShuffleFolder() {
             array[index] = temp;
         }
 
+        // Re-shuffle if first item is the same as pre-shuffled first item
+        while (array[0] === first) {
+            array = shuffle(array);
+        }
         return array;
     }
 
@@ -183,28 +193,30 @@ async function initShuffleFolder() {
      * Replace queue and play first track immediately.
      * @param {string[]} list
      */
-    async function Queue(list, context=null, albumCount) {
+    async function playList(list, context, albumCount) {
         const count = list.length;
         if (count === 0) {
             throw "There is no available track to play";
+        } else if (count === 1) {
+            playerPlayOGFunc({ uri: list[0] }, { featureVersion: Spicetify.Platform.PlayerAPI._defaultFeatureVersion });
+            return;
         }
         list.push("spotify:delimiter");
 
-	await Spicetify.Platform.PlayerAPI.clearQueue();
+        Spicetify.Platform.PlayerAPI.clearQueue();
 
         const isQueue = !context;
 
-
         await Spicetify.CosmosAsync.put("sp://player/v2/main/queue", {
-                queue_revision: Spicetify.Queue?.queueRevision,
-                next_tracks: list.map(uri => ({
-                        uri,
-                        provider: isQueue ? "queue" : "context",
-                        metadata: {
-                                is_queued: isQueue
-                        }
-                })),
-                prev_tracks: Spicetify.Queue?.prevTracks
+            queue_revision: Spicetify.Queue?.queueRevision,
+            next_tracks: list.map((uri) => ({
+                uri,
+                provider: isQueue ? "queue" : "context",
+                metadata: {
+                    is_queued: isQueue,
+                },
+            })),
+            prev_tracks: Spicetify.Queue?.prevTracks,
         });
 
         if (!isQueue) {
@@ -220,10 +232,9 @@ async function initShuffleFolder() {
         Spicetify.Player.next();
     }
 
-
-    async function fetchAndPlay(uri) {
-        await fetchListFromUri(uri)
-            .then((result) => await Queue(result.songs, uri, result.albumCount))
+    function fetchAndPlay(uri) {
+        fetchListFromUri(uri)
+            .then((result) => playList(result.playlists, uri, result.albumCount))
             .catch((err) => Spicetify.showNotification(`${err}`));
     }
-};
+})();
