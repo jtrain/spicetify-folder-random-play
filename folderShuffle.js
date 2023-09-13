@@ -203,29 +203,32 @@
         }
         list.push("spotify:delimiter");
 
-        Spicetify.Platform.PlayerAPI.clearQueue();
+        const { _queue, _client } = Spicetify.Platform.PlayerAPI._queue;
+        const { prevTracks, queueRevision } = _queue;
 
-        const isQueue = !context;
 
-        await Spicetify.CosmosAsync.put("sp://player/v2/main/queue", {
-            queue_revision: Spicetify.Queue?.queueRevision,
-            next_tracks: list.map((uri) => ({
+        const nextTracks = list.map(uri => ({
+            contextTrack: {
                 uri,
-                provider: isQueue ? "queue" : "context",
+                uid: "",
                 metadata: {
-                    is_queued: isQueue,
-                },
-            })),
-            prev_tracks: Spicetify.Queue?.prevTracks,
+                    is_queued: "false"
+                }
+            },
+            removed: [],
+            blocked: [],
+            provider: "context"
+        }));
+
+        _client.setQueue({
+            nextTracks,
+            prevTracks,
+            queueRevision
         });
 
-        if (!isQueue) {
-            await Spicetify.CosmosAsync.post("sp://player/v2/main/update", {
-                context: {
-                    uri: context,
-                    url: "context://" + context,
-                },
-            });
+        if (context) {
+            const {sessionId} = Spicetify.Platform.PlayerAPI.getState();
+            Spicetify.PlayerAPI.updateContext(sessionId, {uri: context, url: "context://" + context});
         }
 
         success(albumCount);
@@ -234,7 +237,7 @@
 
     function fetchAndPlay(uri) {
         fetchListFromUri(uri)
-            .then((result) => playList(result.playlists, uri, result.albumCount))
+            .then((result) => playList(result.playlists, null, result.albumCount))
             .catch((err) => Spicetify.showNotification(`${err}`));
     }
 })();
